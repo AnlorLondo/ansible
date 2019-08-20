@@ -466,6 +466,62 @@ def resp_delete_project(url, request):
     return response(204, content, headers, None, 5, request)
 
 
+@urlmatch(scheme="http", netloc="localhost", path="/api/v4/projects/1/protected_branches", method="get")
+def resp_get_protected_branches(url, request):
+    headers = {'content-type': 'application/json'}
+    content = ('[{"merge_access_levels": [{'
+                    '"access_level": 40,'
+                    '"access_level_description": "Masters",'
+                    '"group_id": null,'
+                    '"user_id": null}],'
+                '"name": "master",'
+                '"push_access_levels": ['
+                    '{"access_level": 40,'
+                    '"access_level_description": "Masters",'
+                    '"group_id": null,'
+                    '"user_id": null}]},'
+                '{"merge_access_levels": [{'
+                    '"access_level": 40,'
+                    '"access_level_description": "Masters",'
+                    '"group_id": null,'
+                    '"user_id": null}],'
+                '"name": "*-stable",'
+                '"push_access_levels": [{'
+                    '"access_level": 40,'
+                    '"access_level_description": "Masters",'
+                    '"group_id": null,'
+                    '"user_id": null}]}]')
+    content = content.encode("utf-8")
+    return response(200, content, headers, None, 5, request)
+
+
+@urlmatch(scheme="http", netloc="localhost", path="/api/v4/projects/1/protected_branches", method="post")
+def resp_create_protected_branch(url, request):
+    headers = {'content-type': 'application/json'}
+    content = ('{"merge_access_levels": [{'
+                    '"access_level": 40,'
+                    '"access_level_description": "Masters",'
+                    '"group_id": null,'
+                    '"user_id": null}],'
+                '"name": "*-stable",'
+                '"push_access_levels": ['
+                    '{"access_level": 40,'
+                    '"access_level_description": "Masters",'
+                    '"group_id": null,'
+                    '"user_id": null}]}')
+    content = content.encode("utf-8")
+    return response(200, content, headers, None, 5, request)
+
+
+@urlmatch(scheme="http", netloc="localhost", path="/api/v4/projects/1/protected_branches", method="delete")
+def resp_delete_protected_branch(url, request):
+    headers = {'content-type': 'application/json'}
+    content = ('{}')
+    content = content.encode("utf-8")
+
+    return response(204, content, headers, None, 5, request)
+
+
 '''
 HOOK API
 '''
