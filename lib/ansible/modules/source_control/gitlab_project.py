@@ -33,7 +33,6 @@ options:
   server_url:
     description:
       - The URL of the Gitlab server, with protocol (i.e. http or https).
-    required: true
     type: str
   login_user:
     description:
@@ -114,6 +113,31 @@ options:
     default: present
     type: str
     choices: ["present", "absent"]
+  protected_branches : 
+    description :
+      - List of branches you want protected.
+      - 'master' branch is always protected by default.
+      - Each branch is a dictionnary
+    suboptions
+      name :
+        description :
+          - the name of the protected branch.
+        required : true
+      merge_access_level : 
+        description :
+          - access level for merges
+        choices :
+          - master
+          - developer
+      push_access_level :
+        description :
+          - access level for pushes
+        choices :
+          - master
+          - developer
+      
+    required : false
+    type : list
 '''
 
 EXAMPLES = '''
@@ -125,7 +149,6 @@ EXAMPLES = '''
     name: my_first_project
     state: absent
   delegate_to: localhost
-
 - name: Create Gitlab Project in group Ansible
   gitlab_project:
     api_url: https://gitlab.example.com/
@@ -139,6 +162,13 @@ EXAMPLES = '''
     snippets_enabled: True
     import_url: http://git.example.com/example/lab.git
     state: present
+    protected_branches :
+    - name : "V*"
+      merge_access_level : master
+      push_access_level : master
+    - name : "*-stable"
+      merge_access_level : master
+      push_access_level : developer
   delegate_to: localhost
 '''
 
@@ -148,26 +178,30 @@ msg:
   returned: always
   type: str
   sample: "Success"
-
 result:
   description: json parsed response from the server
   returned: always
   type: dict
-
 error:
   description: the error message returned by the Gitlab API
   returned: failed
   type: str
   sample: "400: path is already in use"
-
 project:
   description: API object
   returned: always
   type: dict
+protected_branches:
+  description: list of API objects
+  returned: always
+  type: list
 '''
 
 import os
 import traceback
+
+
+DEFAUT = 'default'
 
 GITLAB_IMP_ERR = None
 try:
@@ -184,6 +218,7 @@ from ansible.module_utils._text import to_native
 from ansible.module_utils.gitlab import findGroup, findProject
 
 
+
 class GitLabProject(object):
     def __init__(self, module, gitlab_instance):
         self._module = module
@@ -194,13 +229,15 @@ class GitLabProject(object):
     @param project_name Name of the project
     @param namespace Namespace Object (User or Group)
     @param options Options of the project
+    @param branches Protected branches of the project
     '''
-    def createOrUpdateProject(self, project_name, namespace, options):
+    def createOrUpdateProject(self, project_name, namespace, options, branches):
+      
         changed = False
 
         # Because we have already call userExists in main()
         if self.projectObject is None:
-            project = self.createProject(namespace, {
+            project, ret_branches = self.createProject(namespace, {
                 'name': project_name,
                 'path': options['path'],
                 'description': options['description'],
@@ -209,17 +246,17 @@ class GitLabProject(object):
                 'wiki_enabled': options['wiki_enabled'],
                 'snippets_enabled': options['snippets_enabled'],
                 'visibility': options['visibility'],
-                'import_url': options['import_url']})
+                'import_url': options['import_url']}, branches)
             changed = True
         else:
-            changed, project = self.updateProject(self.projectObject, {
-                'name': project_name,
-                'description': options['description'],
-                'issues_enabled': options['issues_enabled'],
-                'merge_requests_enabled': options['merge_requests_enabled'],
-                'wiki_enabled': options['wiki_enabled'],
-                'snippets_enabled': options['snippets_enabled'],
-                'visibility': options['visibility']})
+            changed, project, ret_branches = self.updateProject(self.projectObject, {
+                    'name': project_name,
+                    'description': options['description'],
+                    'issues_enabled': options['issues_enabled'],
+                    'merge_requests_enabled': options['merge_requests_enabled'],
+                    'wiki_enabled': options['wiki_enabled'],
+                    'snippets_enabled': options['snippets_enabled'],
+                    'visibility': options['visibility']}, branches)
 
         self.projectObject = project
         if changed:
@@ -230,17 +267,19 @@ class GitLabProject(object):
                 project.save()
             except Exception as e:
                 self._module.fail_json(msg="Failed update project: %s " % e)
-            return True
+            return True, ret_branches
         else:
-            return False
+            return False, ret_branches
 
     '''
     @param namespace Namespace Object (User or Group)
     @param arguments Attributs of the project
+    @param branches Protected branches of the project
     '''
-    def createProject(self, namespace, arguments):
+    def createProject(self, namespace, arguments, branches):
+        
         if self._module.check_mode:
-            return True
+            return True, []
 
         arguments['namespace_id'] = namespace.id
         try:
@@ -248,22 +287,119 @@ class GitLabProject(object):
         except (gitlab.exceptions.GitlabCreateError) as e:
             self._module.fail_json(msg="Failed to create project: %s " % to_native(e))
 
-        return project
+        # Create protected branches
+
+        ret_branches = []
+        already_protected = []
+        
+        branches.reverse() # In case of duplicate entries, olny the last declared one will be considered
+        for branche in branches :
+            if branche['name'] not in already_protected :
+                p_branch = self.create_protected_branch(project, branche)
+                ret_branches.append(p_branch)
+                already_protected.append(p_branch.name)
+
+        # master is protected by default
+        if 'master' not in already_protected :
+            ret_branches.append(
+                self.create_protected_branch(project, 
+                                             {'name': 'master',
+                                              'merge_access_level': 'master',
+                                              'push_access_level': 'master'}
+                                             )
+                )
+        return (project, ret_branches)
+
+    '''
+    @param project Project Object
+    @param name name of protected branch
+    @param branch dict with keys 'name', 'merge_access_level' and 'push_access_level'
+    '''
+    def create_protected_branch(self, project, branch) :
+        p_branch = project.protectedbranches.create({
+                'name': branch['name'],
+                'merge_access_level': gitlab_access(branch['merge_access_level']),
+                'push_access_level': gitlab_access(branch['push_access_level'])
+            })
+        return p_branch
+
+    '''
+    @param project Project Object
+    @param branches Protected branches of the project
+    @param changed boolean
+    '''
+    def update_protected_branches(self, project, branches, changed) :
+
+        if branches is None :
+            branches = [] # Avoid "'NoneType' object is not iterable"
+
+        protected_branches = project.protectedbranches.list()
+        branches_to_add = [b for b in branches]
+        ret_branches = []
+        
+        # Update existing branches
+
+        for p_branch in protected_branches :
+
+            branch_already_protected = None
+
+            for branch in branches :
+                if p_branch.name == branch['name'] :
+                    branch_already_protected = branch
+                    branches_to_add.remove(branch)
+                    break # no need to continue loop since branch has been found
+                
+            if branch_already_protected is None : # Branch is not protected in playbook
+                if  p_branch.name != 'master' :
+                    if self._module.check_mode : return True, project, []
+                    p_branch.delete()
+                    changed = True
+
+                else : # master stay protected, but its access may need changes
+                    if p_branch.merge_access_levels[0]['access_level'] != gitlab_access('master') or p_branch.push_access_levels[0]['access_level'] != gitlab_access('master'):
+                        if self._module.check_mode : return True, project, []
+                        p_branch.delete()
+                        p_branch = self.create_protected_branch(project, {'name' : 'master', 'merge_access_level': 'master', 'push_access_level': 'master'})
+                        changed = True
+                    ret_branches.append(p_branch)
+
+            else : # update the protected branch if needed
+                if p_branch.merge_access_levels[0]['access_level'] != gitlab_access(branch_already_protected['merge_access_level']) or p_branch.push_access_levels[0]['access_level'] != gitlab_access(branch_already_protected['push_access_level']):
+                    if self._module.check_mode : return True, project, []
+                    p_branch.delete()
+                    p_branch = self.create_protected_branch(project, branch_already_protected)
+                    changed = True
+                ret_branches.append(p_branch)
+
+        # Add new branches
+
+        for new_branch in branches_to_add :
+            if self._module.check_mode : return True, project, []
+            p_branch = self.create_protected_branch(project, new_branch)
+            ret_branches.append(p_branch)
+            changed = True
+            
+        if self._module.check_mode : return True, project, []
+
+        if not changed : ret_branches = protected_branches
+
+        return changed, project, ret_branches
 
     '''
     @param project Project Object
     @param arguments Attributs of the project
+    @param branches Protected branches of the project
     '''
-    def updateProject(self, project, arguments):
+    def updateProject(self, project, arguments, branches):
         changed = False
-
         for arg_key, arg_value in arguments.items():
             if arguments[arg_key] is not None:
                 if getattr(project, arg_key) != arguments[arg_key]:
                     setattr(project, arg_key, arguments[arg_key])
                     changed = True
+            
+        return self.update_protected_branches(project, branches, changed)
 
-        return (changed, project)
 
     def deleteProject(self):
         if self._module.check_mode:
@@ -288,8 +424,16 @@ class GitLabProject(object):
 
 def deprecation_warning(module):
     deprecated_aliases = ['login_token']
-
     module.deprecate("Aliases \'{aliases}\' are deprecated".format(aliases='\', \''.join(deprecated_aliases)), "2.10")
+
+
+def gitlab_access(access) :
+    ''' Returns Gitlab constant corresponding to access,
+    by giving MAINTAINER_ACCESS by default'''
+    if access == "developer" : return gitlab.DEVELOPER_ACCESS
+    return gitlab.MAINTAINER_ACCESS
+
+
 
 
 def main():
@@ -310,8 +454,9 @@ def main():
         visibility=dict(type='str', default="private", choices=["internal", "private", "public"], aliases=["visibility_level"]),
         import_url=dict(type='str'),
         state=dict(type='str', default="present", choices=["absent", "present"]),
+        protected_branches=dict(type='list', elements='dict'),  
     ))
-
+    
     module = AnsibleModule(
         argument_spec=argument_spec,
         mutually_exclusive=[
@@ -360,6 +505,20 @@ def main():
     visibility = module.params['visibility']
     import_url = module.params['import_url']
     state = module.params['state']
+    protected_branches = module.params['protected_branches']
+    
+    branches = protected_branches if protected_branches is not None else []
+    
+    # Branches verification
+    
+    for branch in branches :
+        if 'name' not in branch :
+            module.fail_json(msg="Each element of 'protected_branch' must have a name.")
+        if 'merge_access_level' not in branch :
+            branch['merge_access_level'] = 'master'
+        if 'push_access_level' not in branch :
+            branch['push_access_level'] = 'master'
+
 
     if not HAS_GITLAB_PACKAGE:
         module.fail_json(msg=missing_required_lib("python-gitlab"), exception=GITLAB_IMP_ERR)
@@ -383,14 +542,17 @@ def main():
     if group_identifier:
         group = findGroup(gitlab_instance, group_identifier)
         if group is None:
-            module.fail_json(msg="Failed to create project: group %s doesn't exists" % group_identifier)
-
-        namespace = gitlab_instance.namespaces.get(group.id)
-        project_exists = gitlab_project.existsProject(namespace, project_path)
+            try : # try with user
+                namespace = [n for n in gitlab_instance.namespaces.list() if n.full_path == group_identifier][0]
+            except IndexError :
+                module.fail_json(msg="Failed to create project: group %s doesn't exists" % group_identifier)
+        else :
+            namespace = gitlab_instance.namespaces.get(group.id)
     else:
         user = gitlab_instance.users.list(username=gitlab_instance.user.username)[0]
-        namespace = gitlab_instance.namespaces.get(user.id)
-        project_exists = gitlab_project.existsProject(namespace, project_path)
+        namespace = gitlab_instance.namespaces.get(user.id) # doesn't work
+        
+    project_exists = gitlab_project.existsProject(namespace, project_path)
 
     if state == 'absent':
         if project_exists:
@@ -400,7 +562,7 @@ def main():
             module.exit_json(changed=False, msg="Project deleted or does not exists")
 
     if state == 'present':
-        if gitlab_project.createOrUpdateProject(project_name, namespace, {
+        (changed, p_branches) = gitlab_project.createOrUpdateProject(project_name, namespace, {
                                                 "path": project_path,
                                                 "description": project_description,
                                                 "issues_enabled": issues_enabled,
@@ -408,11 +570,15 @@ def main():
                                                 "wiki_enabled": wiki_enabled,
                                                 "snippets_enabled": snippets_enabled,
                                                 "visibility": visibility,
-                                                "import_url": import_url}):
-
-            module.exit_json(changed=True, msg="Successfully created or updated the project %s" % project_name, project=gitlab_project.projectObject._attrs)
+                                                "import_url": import_url}, branches)
+        ret_branches = [p_branch._attrs for p_branch in p_branches]
+        if changed :
+            module.exit_json(changed=True, project_created=(not project_exists), msg="Successfully created or updated the project %s" % project_name, project=gitlab_project.projectObject._attrs, protected_branches=ret_branches)
         else:
-            module.exit_json(changed=False, msg="No need to update the project %s" % project_name, project=gitlab_project.projectObject._attrs)
+            module.exit_json(changed=False, project_created=(not project_exists), msg="No need to update the project %s" % project_name, project=gitlab_project.projectObject._attrs, protected_branches=ret_branches)
+
+
+
 
 
 if __name__ == '__main__':
